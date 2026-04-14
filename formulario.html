@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Relatório Mensal — Nossa Agência Missionária</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&family=Merriweather:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, collection, addDoc, serverTimestamp, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+// ════════════════════════════════════════════════════
+// ▶ SUBSTITUA PELOS SEUS DADOS DO FIREBASE (PASSO 5)
+// ════════════════════════════════════════════════════
+const firebaseConfig = {
+  apiKey: "AIzaSyBmwXsyYsMBw8OlruOO8bhFy-KNRBylGEc",
+  authDomain: "nam-relatorios.firebaseapp.com",
+  projectId: "nam-relatorios",
+  storageBucket: "nam-relatorios.firebasestorage.app",
+  messagingSenderId: "761657782319",
+  appId: "1:761657782319:web:ffd6ff79dc05392aeed6da"
+};
+// ════════════════════════════════════════════════════
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+
+// ════════════════════════════════════════════════════
+// ▶ ID DA PASTA DO GOOGLE DRIVE (PASSO DRIVE)
+//   Crie uma pasta no Drive, clique com botão direito
+//   → "Compartilhar" → "Qualquer pessoa com o link pode ver"
+//   Copie o ID da URL (parte após /folders/)
+// ════════════════════════════════════════════════════
+const DRIVE_FOLDER_ID = '15fbCkPufQdDByMPu3becLBwmMopz7wzj';
+// ════════════════════════════════════════════════════
+
+// ── Upload para Google Drive via Apps Script (qualidade original) ──
+// O Apps Script serve como proxy autenticado — fotos ficam no seu Drive
+async function uploadParaDrive(file, nomePasta) {
+  // Lê o arquivo como base64
+  const base64 = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+  const payload = {
+    nome: file.name,
+    tipo: file.type,
+    base64,
+    pasta: nomePasta,
+    folderId: DRIVE_FOLDER_ID
+  };
+
+  const resp = await fetch(APPS_SCRIPT_URL, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+
+  const data = await resp.json();
+  if (!data.url) throw new Error('Drive não retornou URL');
+  return { nome: file.name, tipo: file.type, url: data.url, fileId: data.fileId };
+}
+// ──────────────────────────────────────────────────────────────────
+
+// ════════════════════════════════════════════════════
+// ▶ URL DO GOOGLE APPS SCRIPT (PASSO APPS SCRIPT)
+// ════════════════════════════════════════════════════
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby81aplZiBOvUP6RiP9TV10Bt8ODPWFJQM623x_TQrmjQDiAklvBTaecuQFMMZG5dsD7w/exec';
+// ════════════════════════════════════════════════════
+
+
+const MESES = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
+
+// ════════════════════════════════════════════════════
+// ▶ LISTA DE MISSIONÁRIOS — edite conforme sua equipe
+// ════════════════════════════════════════════════════
+const MISSIONARIOS = [
+  { nome: "Davi e Mileide", campo: "Rio Juruá — AM (Envirá)" },
+  { nome: "Micael e Gislaine", campo: "Rio Purus — AM (Lago Mamoriá)" },
+  { nome: "Mateus e Emely", campo: "Rio Purus — AM (Maraã)" },
+  { nome: "Charles e Rainas", campo: "Rio Purus — AM (Comunidades)" },
+  { nome: "Francisco e equipe", campo: "Rio Negro / Rio Unini — AM" },
+  { nome: "Josepe e Angelica", campo: "Rio Purus — Comunidades" },
+  { nome: "Thiago e Kézia", campo: "Costa Rica" },
+  { nome: "Josué e Glória", campo: "Rio Purus — Comunidades" },
+  { nome: "Sairose e Noemi", campo: "Moçambique" },
+  { nome: "Leonardo e lony", campo: "Nordeste — Natal/RN" },
+  { nome: "James", campo: "Rio Juruá - AM (Ipixuna)" },
+];
+// ════════════════════════════════════════════════════
+
+// Preenche select de missionários
+function buildMissionarioSelect() {
+  const sel = document.getElementById('f-missionario');
+  MISSIONARIOS.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = JSON.stringify(m);
+    opt.textContent = m.nome + ' — ' + m.campo;
+    sel.appendChild(opt);
+  });
+}
+
+// Preenche select de meses
+function buildMesSelect() {
+  const sel = document.getElementById('f-mes');
+  const now = new Date();
+  // mostra mês anterior pré-selecionado
+  const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  for (let a = 2025; a <= now.getFullYear() + 1; a++) {
+    for (let m = 0; m < 12; m++) {
+      const opt = document.createElement('option');
+      opt.value = MESES[m] + ' ' + a;
+      opt.textContent = MESES[m] + ' de ' + a;
+      if (a === prevMonth.getFullYear() && m === prevMonth.getMonth()) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  }
+}
+
+// Contador de caracteres
+function setupCounter(id, min) {
+  const el = document.getElementById(id);
+  const counter = document.getElementById('cnt-' + id);
+  if (!el || !counter) return;
+  el.addEventListener('input', () => {
+    const n = el.value.trim().length;
+    counter.textContent = n + ' / ' + min + ' mínimo';
+    counter.style.color = n >= min ? '#01974B' : n > min * 0.7 ? '#E67E22' : '#C0392B';
+    el.dataset.ok = n >= min ? '1' : '';
+    markField(el, n >= min);
+  });
+}
+
+function markField(el, ok) {
+  el.classList.toggle('campo-ok', ok);
+  el.classList.toggle('campo-erro', !ok && el.value.trim().length > 0);
+}
+
+// Upload de fotos
+let fotosFiles = [];
+function setupUpload() {
+  const input = document.getElementById('f-fotos');
+  const area  = document.getElementById('upload-area');
+  const preview = document.getElementById('fotos-preview');
+
+  area.addEventListener('click', () => input.click());
+  area.addEventListener('dragover', e => { e.preventDefault(); area.classList.add('drag'); });
+  area.addEventListener('dragleave', () => area.classList.remove('drag'));
+  area.addEventListener('drop', e => { e.preventDefault(); area.classList.remove('drag'); processFiles(e.dataTransfer.files); });
+  input.addEventListener('change', () => processFiles(input.files));
+
+  function processFiles(files) {
+    Array.from(files).forEach(f => {
+      if (!f.type.startsWith('image/') && !f.type.startsWith('video/')) return;
+      if (f.size > 20 * 1024 * 1024) { showGlobalError('Arquivo "' + f.name + '" é maior que 20MB. Compacte antes de enviar.'); return; }
+      if (fotosFiles.find(x => x.name === f.name && x.size === f.size)) return;
+      if (fotosFiles.length >= 10) { showGlobalError('Máximo de 10 arquivos por relatório.'); return; }
+      fotosFiles.push(f);
+
+      const div = document.createElement('div');
+      div.className = 'foto-thumb';
+      div.dataset.name = f.name;
+
+      if (f.type.startsWith('image/')) {
+        const img = document.createElement('img');
+        const reader = new FileReader();
+        reader.onload = e => { img.src = e.target.result; };
+        reader.readAsDataURL(f);
+        div.appendChild(img);
+      } else {
+        div.innerHTML = '<div class="foto-video-icon">🎬</div>';
+      }
+
+      const rm = document.createElement('button');
+      rm.className = 'foto-rm';
+      rm.textContent = '✕';
+      rm.onclick = (e) => { e.stopPropagation(); fotosFiles = fotosFiles.filter(x => x.name !== f.name); div.remove(); updateFotoCount(); };
+      div.appendChild(rm);
+
+      const nm = document.createElement('span');
+      nm.className = 'foto-name';
+      nm.textContent = f.name.substring(0, 12) + (f.name.length > 12 ? '…' : '');
+      div.appendChild(nm);
+
+      preview.appendChild(div);
+      updateFotoCount();
+    });
+  }
+
+  function updateFotoCount() {
+    const cnt = document.getElementById('fotos-count');
+    cnt.textContent = fotosFiles.length + '/10 fotos';
+    cnt.style.color = fotosFiles.length >= 3 ? '#01974B' : '#E67E22';
+  }
+}
+
+// Validação e submit
+async function submitForm() {
+  clearGlobalError();
+  const erros = [];
+
+  const missRaw = document.getElementById('f-missionario').value;
+  if (!missRaw) { erros.push('Selecione seu nome na lista.'); markRequired('f-missionario'); }
+
+  const mesRef = document.getElementById('f-mes').value;
+  if (!mesRef) { erros.push('Selecione o mês de referência.'); markRequired('f-mes'); }
+
+  const resumo = document.getElementById('f-resumo').value.trim();
+  if (resumo.length < 300) { erros.push('Resumo geral precisa ter pelo menos 300 caracteres.'); markRequired('f-resumo'); }
+
+  const alcancadas = document.getElementById('f-alcancadas').value;
+  if (!alcancadas || isNaN(alcancadas) || parseInt(alcancadas) < 0) { erros.push('Informe quantas pessoas foram alcançadas.'); markRequired('f-alcancadas'); }
+
+  const decisoes = document.querySelector('input[name="decisoes"]:checked');
+  if (!decisoes) { erros.push('Informe se houve batismos ou decisões.'); document.getElementById('decisoes-group').classList.add('group-erro'); }
+
+  const discipulado = document.getElementById('f-discipulado').value.trim();
+  if (discipulado.length < 100) { erros.push('Fale um pouco mais sobre o discipulado (mínimo 100 caracteres).'); markRequired('f-discipulado'); }
+
+  const desafios = document.getElementById('f-desafios').value.trim();
+  if (desafios.length < 80) { erros.push('Descreva ao menos um desafio do mês.'); markRequired('f-desafios'); }
+
+  const frutos = document.getElementById('f-frutos').value.trim();
+  if (frutos.length < 80) { erros.push('Compartilhe o maior fruto ou momento marcante.'); markRequired('f-frutos'); }
+
+  const oracao = document.getElementById('f-oracao').value.trim();
+  if (oracao.length < 50) { erros.push('Compartilhe seus pedidos de oração.'); markRequired('f-oracao'); }
+
+  if (fotosFiles.length < 3) { erros.push('Envie pelo menos 3 fotos do mês.'); document.getElementById('upload-area').classList.add('upload-erro'); }
+
+  if (erros.length > 0) {
+    showGlobalError('⚠️ Corrija os campos abaixo antes de enviar:\n• ' + erros.join('\n• '));
+    document.getElementById('erro-global').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+
+  const missionario = JSON.parse(missRaw);
+  const btn = document.getElementById('btn-enviar');
+  btn.disabled = true;
+
+  try {
+    // Verificar envio duplicado
+    btn.textContent = '⏳ Verificando envio anterior...';
+    const q = query(collection(db, "relatorios"), where("campo", "==", missionario.campo), where("mes_referencia", "==", mesRef));
+    const existing = await getDocs(q);
+    if (!existing.empty) {
+      showGlobalError('Você já enviou o relatório de ' + mesRef + ' para este campo. Entre em contato com a secretaria se precisar corrigir algo.');
+      btn.disabled = false; btn.textContent = '✦ Enviar Relatório'; return;
+    }
+
+    // Upload fotos para o Google Drive (qualidade original)
+    const nomePasta = `${mesRef.replace(' ','_')}_${missionario.campo.replace(/[^a-zA-Z0-9]/g,'_')}`;
+    const fotosInfo = [];
+    for (let i = 0; i < fotosFiles.length; i++) {
+      btn.textContent = `⏳ Enviando foto ${i+1} de ${fotosFiles.length} para o Drive...`;
+      try {
+        const info = await uploadParaDrive(fotosFiles[i], nomePasta);
+        fotosInfo.push(info);
+      } catch(uploadErr) {
+        console.warn('Erro ao enviar foto ' + fotosFiles[i].name, uploadErr);
+        fotosInfo.push({ nome: fotosFiles[i].name, tipo: fotosFiles[i].type, url: null, erro: true });
+      }
+    }
+
+    // Salvar Firestore
+    btn.textContent = '⏳ Salvando relatório...';
+    const [mes, ano] = mesRef.split(' ');
+    const mesNum = MESES.indexOf(mes) + 1;
+
+    await addDoc(collection(db, "relatorios"), {
+      missionario_nome: missionario.nome,
+      campo: missionario.campo,
+      mes_referencia: mesRef,
+      mes_ano_num: parseInt(ano) * 100 + mesNum,
+      resumo_geral: resumo,
+      pessoas_alcancadas: parseInt(alcancadas),
+      batismos: parseInt(document.getElementById('f-batismos').value || '0'),
+      houve_decisoes: decisoes.value,
+      detalhe_decisoes: document.getElementById('f-detalhe-decisoes').value.trim(),
+      discipulado,
+      criancas_jovens: document.getElementById('f-criancas').value.trim(),
+      desafios,
+      frutos_destaques: frutos,
+      pedidos_oracao: oracao,
+      necessidades: document.getElementById('f-necessidades').value.trim(),
+      fotos: fotosInfo,
+      status: "pendente_revisao",
+      relatorio_editado: null,
+      criado_em: serverTimestamp()
+    });
+
+    document.getElementById('form-wrap').style.display = 'none';
+    document.getElementById('sucesso').style.display = 'block';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+
+  } catch(e) {
+    console.error(e);
+    showGlobalError('Erro ao enviar: ' + e.message + '\nVerifique sua internet e tente novamente.');
+    btn.disabled = false;
+    btn.textContent = '✦ Enviar Relatório';
+  }
+}
+
+function markRequired(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.add('campo-erro');
+}
+function showGlobalError(msg) {
+  const el = document.getElementById('erro-global');
+  el.innerHTML = msg.replace(/\n/g, '<br>');
+  el.style.display = 'block';
+}
+function clearGlobalError() {
+  const el = document.getElementById('erro-global');
+  el.style.display = 'none';
+}
+
+// Decisões — campo condicional
+function setupDecisoes() {
+  document.querySelectorAll('input[name="decisoes"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      document.getElementById('decisoes-group').classList.remove('group-erro');
+      const show = radio.value === 'sim';
+      document.getElementById('detalhe-decisoes-wrap').style.display = show ? 'block' : 'none';
+    });
+  });
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  buildMissionarioSelect();
+  buildMesSelect();
+  setupUpload();
+  setupDecisoes();
+  setupCounter('f-resumo', 300);
+  setupCounter('f-discipulado', 100);
+  setupCounter('f-desafios', 80);
+  setupCounter('f-frutos', 80);
+  setupCounter('f-oracao', 50);
+  document.getElementById('btn-enviar').addEventListener('click', submitForm);
+
+  // Limpar erro ao focar campo
+  document.querySelectorAll('select, textarea, input').forEach(el => {
+    el.addEventListener('focus', () => el.classList.remove('campo-erro'));
+  });
+});
+</script>
+
+<style>
+:root {
+  --blue: #0044B3;
+  --blue-dark: #02182F;
+  --blue-mid: #1a4fa8;
+  --green: #01974B;
+  --green-dark: #017A3D;
+  --white: #fff;
+  --off: #F4F7FF;
+  --text: #02182F;
+  --soft: #3A5A7A;
+  --border: #C8D8F0;
+  --red: #C0392B;
+  --orange: #E67E22;
+  --shadow: 0 2px 16px rgba(2,24,47,0.10);
+  --shadow-lg: 0 4px 28px rgba(2,24,47,0.14);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Montserrat', sans-serif; background: var(--off); color: var(--text); min-height: 100vh; }
+
+/* HEADER */
+.hdr { background: var(--blue-dark); }
+.hdr-top { padding: 24px 20px 20px; text-align: center; }
+.hdr-logo { display: inline-flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.hdr-logo-box { width: 40px; height: 40px; background: var(--blue); border-radius: 10px; display: flex; align-items: center; justify-content: center; }
+.hdr-logo-box svg { width: 22px; height: 22px; }
+.hdr-logo span { font-size: 14px; font-weight: 700; color: white; letter-spacing: 0.3px; }
+.hdr-title h1 { font-family: 'Merriweather', serif; font-size: clamp(17px, 3.5vw, 24px); color: white; margin-bottom: 6px; }
+.hdr-title p { font-size: 13px; color: #7EB8FF; max-width: 500px; margin: 0 auto; line-height: 1.5; }
+.hdr-bar { height: 4px; background: linear-gradient(90deg, var(--blue) 0%, var(--green) 100%); }
+
+/* PROGRESS */
+.progress-wrap { background: white; border-bottom: 1px solid var(--border); padding: 12px 20px; }
+.progress-inner { max-width: 680px; margin: 0 auto; }
+.prog-top { display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; color: var(--soft); margin-bottom: 7px; text-transform: uppercase; letter-spacing: 0.5px; }
+.prog-bar-bg { background: #E0E8F8; border-radius: 99px; height: 6px; overflow: hidden; }
+.prog-bar { background: linear-gradient(90deg, var(--blue), var(--green)); height: 100%; border-radius: 99px; transition: width 0.4s ease; width: 0%; }
+
+/* MAIN */
+.main { max-width: 680px; margin: 0 auto; padding: 24px 16px 100px; }
+
+/* ERRO GLOBAL */
+#erro-global {
+  display: none;
+  background: #FFF0EE;
+  border: 2px solid var(--red);
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 20px;
+  font-size: 13px;
+  color: var(--red);
+  font-weight: 500;
+  line-height: 1.8;
+}
+
+/* CARDS */
+.card {
+  background: white;
+  border-radius: 16px;
+  padding: 22px 22px 20px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow);
+  border-left: 5px solid var(--border);
+  transition: border-color 0.2s;
+  position: relative;
+}
+.card.card-ok { border-left-color: var(--green); }
+.card-titulo {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.card-num {
+  min-width: 26px;
+  height: 26px;
+  background: var(--blue);
+  color: white;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.card-label {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--blue-dark);
+  line-height: 1.4;
+  flex: 1;
+}
+.obrig { color: var(--red); margin-left: 3px; }
+.card-dica {
+  font-size: 12px;
+  color: var(--soft);
+  background: #F0F5FF;
+  border-left: 3px solid var(--blue);
+  border-radius: 0 8px 8px 0;
+  padding: 8px 12px;
+  margin: 10px 0 12px;
+  line-height: 1.6;
+}
+.ok-check {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: 22px;
+  height: 22px;
+  background: var(--green);
+  border-radius: 50%;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+}
+.card.card-ok .ok-check { display: flex; }
+
+/* INPUTS */
+select, textarea, input[type="number"], input[type="text"] {
+  width: 100%;
+  padding: 12px 14px;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  font-size: 14px;
+  font-family: 'Montserrat', sans-serif;
+  color: var(--text);
+  background: var(--off);
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  -webkit-appearance: none;
+}
+select:focus, textarea:focus, input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(0,68,179,0.12);
+  background: white;
+}
+.campo-ok { border-color: var(--green) !important; }
+.campo-erro { border-color: var(--red) !important; box-shadow: 0 0 0 3px rgba(192,57,43,0.10) !important; }
+.group-erro .radio-label { border-color: var(--red) !important; }
+textarea { min-height: 120px; resize: vertical; line-height: 1.7; }
+
+.char-cnt {
+  font-size: 11px;
+  font-weight: 600;
+  text-align: right;
+  margin-top: 5px;
+  color: var(--red);
+  transition: color 0.2s;
+}
+
+/* RADIO */
+.radio-group { display: flex; gap: 10px; flex-wrap: wrap; }
+.radio-label {
+  flex: 1;
+  min-width: 120px;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  padding: 11px 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--soft);
+  transition: all 0.15s;
+  background: var(--off);
+}
+.radio-label:hover { border-color: var(--blue); background: #EEF4FF; }
+.radio-label input { display: none; }
+.radio-label.checked { border-color: var(--blue); background: #EEF4FF; color: var(--blue-dark); }
+.radio-dot {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+}
+.radio-label.checked .radio-dot {
+  border-color: var(--blue);
+  background: var(--blue);
+}
+.radio-label.checked .radio-dot::after {
+  content: '';
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: white;
+}
+
+/* CONDICIONAL */
+.cond-field { display: none; background: #EEF4FF; border-radius: 10px; padding: 14px; margin-top: 12px; }
+.cond-field.show { display: block; }
+.cond-field label { font-size: 12px; font-weight: 700; color: var(--soft); display: block; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.4px; }
+
+/* UPLOAD */
+.upload-area {
+  border: 2.5px dashed var(--border);
+  border-radius: 14px;
+  padding: 28px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: var(--off);
+}
+.upload-area:hover, .upload-area.drag { border-color: var(--blue); background: #EEF4FF; }
+.upload-erro { border-color: var(--red) !important; }
+.upload-icon { font-size: 36px; display: block; margin-bottom: 8px; }
+.upload-title { font-size: 14px; font-weight: 700; color: var(--blue-dark); margin-bottom: 4px; }
+.upload-hint { font-size: 12px; color: var(--soft); }
+#fotos-count { font-size: 12px; font-weight: 700; text-align: right; margin-top: 8px; color: var(--orange); }
+.fotos-preview-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.foto-thumb {
+  position: relative;
+  width: 76px; height: 76px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #DDE8F8;
+  border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column;
+}
+.foto-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.foto-video-icon { font-size: 28px; }
+.foto-rm {
+  position: absolute; top: 3px; right: 3px;
+  width: 20px; height: 20px;
+  background: rgba(0,0,0,0.65);
+  border: none; border-radius: 50%;
+  color: white; font-size: 10px; font-weight: 700;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.foto-name { font-size: 9px; color: var(--soft); text-align: center; padding: 2px; word-break: break-all; }
+
+/* SUBMIT */
+.submit-area { text-align: center; margin-top: 28px; }
+.btn-enviar {
+  background: linear-gradient(135deg, var(--blue-dark), var(--blue));
+  color: white;
+  border: none;
+  padding: 17px 48px;
+  border-radius: 99px;
+  font-size: 16px;
+  font-weight: 700;
+  font-family: 'Montserrat', sans-serif;
+  cursor: pointer;
+  box-shadow: 0 6px 24px rgba(0,68,179,0.35);
+  transition: all 0.2s;
+  letter-spacing: 0.3px;
+  width: 100%;
+  max-width: 380px;
+}
+.btn-enviar:hover { transform: translateY(-2px); box-shadow: 0 10px 32px rgba(0,68,179,0.4); }
+.btn-enviar:disabled { background: #94A8C8; cursor: not-allowed; transform: none; box-shadow: none; }
+.submit-aviso { font-size: 12px; color: var(--soft); margin-top: 12px; }
+
+/* SUCESSO */
+#sucesso { display: none; text-align: center; padding: 60px 20px; max-width: 500px; margin: 0 auto; }
+.sucesso-icon { font-size: 64px; margin-bottom: 20px; display: block; }
+#sucesso h2 { font-family: 'Merriweather', serif; font-size: 22px; color: var(--green-dark); margin-bottom: 12px; }
+#sucesso p { font-size: 14px; color: var(--soft); line-height: 1.7; }
+.sucesso-verso { background: #F0FDF7; border-left: 4px solid var(--green); border-radius: 0 10px 10px 0; padding: 14px 16px; margin: 24px 0; text-align: left; font-style: italic; font-size: 13px; color: var(--green-dark); }
+
+/* RODAPÉ */
+footer { background: var(--blue-dark); color: #7EB8FF; text-align: center; padding: 18px; font-size: 12px; margin-top: 40px; }
+</style>
+</head>
+<body>
+
+<header class="hdr">
+  <div class="hdr-top">
+    <div class="hdr-logo">
+      <div class="hdr-logo-box">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6L12 2z" fill="white"/></svg>
+      </div>
+      <span>Nossa Agência Missionária</span>
+    </div>
+    <div class="hdr-title">
+      <h1>Relatório Mensal do Campo</h1>
+      <p>Preencha com cuidado e detalhes. Cada informação fortalece nossa parceria com as igrejas que apoiam sua missão.</p>
+    </div>
+  </div>
+  <div class="hdr-bar"></div>
+</header>
+
+<div class="progress-wrap">
+  <div class="progress-inner">
+    <div class="prog-top">
+      <span id="prog-label">Preenchimento em andamento</span>
+      <span id="prog-pct">0%</span>
+    </div>
+    <div class="prog-bar-bg"><div class="prog-bar" id="prog-bar"></div></div>
+  </div>
+</div>
+
+<div id="form-wrap">
+  <main class="main">
+    <div id="erro-global"></div>
+
+    <!-- 1. MISSIONÁRIO -->
+    <div class="card" id="card-1">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">1</div>
+        <label class="card-label" for="f-missionario">Seu nome<span class="obrig">*</span></label>
+      </div>
+      <div class="card-dica">Selecione seu nome na lista. Se não aparecer, entre em contato com a secretaria.</div>
+      <select id="f-missionario">
+        <option value="">— Selecione seu nome —</option>
+      </select>
+    </div>
+
+    <!-- 2. MÊS -->
+    <div class="card" id="card-2">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">2</div>
+        <label class="card-label" for="f-mes">Mês de referência — sobre qual mês você está relatando?<span class="obrig">*</span></label>
+      </div>
+      <div class="card-dica">Normalmente o mês que acabou de passar. O sistema seleciona automaticamente, mas confirme.</div>
+      <select id="f-mes"></select>
+    </div>
+
+    <!-- 3. RESUMO GERAL -->
+    <div class="card" id="card-3">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">3</div>
+        <label class="card-label" for="f-resumo">Resumo geral do mês — o que aconteceu no seu campo?<span class="obrig">*</span></label>
+      </div>
+      <div class="card-dica">Conte com suas palavras: cultos, visitas, obras, evangelismo, caminhadas, reuniões com líderes. Seja específico — esses detalhes vão para as igrejas parceiras que apoiam você.</div>
+      <textarea id="f-resumo" placeholder="Ex: Neste mês visitamos três comunidades ao longo do rio. Em Santo Antônio celebramos a primeira Ceia do Senhor da comunidade. Também realizamos atividades com as crianças na escola local..."></textarea>
+      <div class="char-cnt" id="cnt-f-resumo">0 / 300 mínimo</div>
+    </div>
+
+    <!-- 4. PESSOAS ALCANÇADAS -->
+    <div class="card" id="card-4">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">4</div>
+        <label class="card-label" for="f-alcancadas">Quantas pessoas foram alcançadas com o Evangelho neste mês?<span class="obrig">*</span></label>
+      </div>
+      <div class="card-dica">Inclua todos os contatos: cultos, visitas, evangelismo nas ruas, trabalho com crianças. Se não souber exato, estime.</div>
+      <input type="number" id="f-alcancadas" min="0" placeholder="Ex: 45" style="max-width:200px;">
+    </div>
+
+    <!-- 5. BATISMOS / DECISÕES -->
+    <div class="card" id="card-5">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">5</div>
+        <span class="card-label">Houve batismos ou decisões por Cristo neste mês?<span class="obrig">*</span></span>
+      </div>
+      <div class="card-dica">Qualquer decisão conta — entrega de vida, reafirmação de fé, ou batismo nas águas.</div>
+      <div class="radio-group" id="decisoes-group">
+        <label class="radio-label" onclick="this.classList.add('checked'); this.parentElement.querySelectorAll('.radio-label').forEach(l=>l!==this&&l.classList.remove('checked')); document.getElementById('detalhe-decisoes-wrap').classList.add('show');">
+          <input type="radio" name="decisoes" value="sim">
+          <div class="radio-dot"></div>
+          Sim, houve! 🙌
+        </label>
+        <label class="radio-label" onclick="this.classList.add('checked'); this.parentElement.querySelectorAll('.radio-label').forEach(l=>l!==this&&l.classList.remove('checked')); document.getElementById('detalhe-decisoes-wrap').classList.remove('show');">
+          <input type="radio" name="decisoes" value="nao">
+          <div class="radio-dot"></div>
+          Não desta vez
+        </label>
+      </div>
+      <div class="cond-field" id="detalhe-decisoes-wrap">
+        <label for="f-batismos">Quantos batismos?</label>
+        <input type="number" id="f-batismos" min="0" value="0" style="max-width:120px; margin-bottom:10px;">
+        <label for="f-detalhe-decisoes">Detalhe — quem foram, o que aconteceu:</label>
+        <textarea id="f-detalhe-decisoes" style="min-height:80px;" placeholder="Ex: Maria, 34 anos, após 6 meses de discipulado. João e Ana, casal jovem que participava dos cultos há 3 meses..."></textarea>
+      </div>
+    </div>
+
+    <!-- 6. DISCIPULADO -->
+    <div class="card" id="card-6">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">6</div>
+        <label class="card-label" for="f-discipulado">Como está o discipulado no seu campo?<span class="obrig">*</span></label>
+      </div>
+      <div class="card-dica">Grupos em andamento, estudos bíblicos, acompanhamento de novos convertidos, formação de líderes locais.</div>
+      <textarea id="f-discipulado" style="min-height:100px;" placeholder="Ex: Estamos com dois grupos bíblicos semanais. Um deles tem 8 pessoas, incluindo dois líderes que estamos treinando para multiplicar o grupo..."></textarea>
+      <div class="char-cnt" id="cnt-f-discipulado">0 / 100 mínimo</div>
+    </div>
+
+    <!-- 7. CRIANÇAS E JOVENS -->
+    <div class="card" id="card-7">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">7</div>
+        <label class="card-label" for="f-criancas">Houve ações com crianças ou jovens? Descreva.</label>
+      </div>
+      <div class="card-dica">Atividades bíblicas, ministério infantil, trabalho com adolescentes. Se não houve, escreva isso — está tudo bem.</div>
+      <textarea id="f-criancas" style="min-height:90px;" placeholder="Ex: Realizamos atividades com 20 crianças na escola da comunidade. Contamos histórias bíblicas e fizemos dinâmicas sobre amizade e cuidado com o próximo...  (ou: Não houve ações específicas com crianças este mês.)"></textarea>
+    </div>
+
+    <!-- 8. DESAFIOS -->
+    <div class="card" id="card-8">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">8</div>
+        <label class="card-label" for="f-desafios">Quais foram os maiores desafios deste mês?<span class="obrig">*</span></label>
+      </div>
+      <div class="card-dica">Seja honesto. Distâncias, dificuldades financeiras, resistência espiritual, clima, saúde — esses relatos nos ajudam a orar e apoiar melhor você.</div>
+      <textarea id="f-desafios" style="min-height:90px;" placeholder="Ex: A seca severa dificultou a navegação e atrasamos a visita a duas comunidades. Também tivemos um momento de resistência espiritual em uma família que estávamos acompanhando..."></textarea>
+      <div class="char-cnt" id="cnt-f-desafios">0 / 80 mínimo</div>
+    </div>
+
+    <!-- 9. FRUTOS E DESTAQUES -->
+    <div class="card" id="card-9">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">9</div>
+        <label class="card-label" for="f-frutos">Qual foi o maior fruto ou momento marcante do mês?<span class="obrig">*</span></label>
+      </div>
+      <div class="card-dica">Um testemunho, uma resposta de oração, uma conversão, um avanço na obra. Pode ser algo simples — o que tocou o seu coração.</div>
+      <textarea id="f-frutos" style="min-height:100px;" placeholder="Ex: A maior bênção foi ver a família Silva participar pela primeira vez do culto depois de 2 anos de acompanhamento. O pai, que sempre foi resistente, veio até mim com lágrimas nos olhos..."></textarea>
+      <div class="char-cnt" id="cnt-f-frutos">0 / 80 mínimo</div>
+    </div>
+
+    <!-- 10. ORAÇÃO -->
+    <div class="card" id="card-10">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">10</div>
+        <label class="card-label" for="f-oracao">Pedidos de oração para o próximo mês<span class="obrig">*</span></label>
+      </div>
+      <div class="card-dica">Compartilhe o que está no seu coração. A equipe e as igrejas parceiras vão interceder especificamente por esses pedidos.</div>
+      <textarea id="f-oracao" style="min-height:90px;" placeholder="Ex: Ore pela família Santos, que está se aproximando da fé. Ore pela nossa saúde — estamos chegando na época de doenças. Ore pela provisão para a próxima viagem de barco..."></textarea>
+      <div class="char-cnt" id="cnt-f-oracao">0 / 50 mínimo</div>
+    </div>
+
+    <!-- 11. NECESSIDADES -->
+    <div class="card" id="card-11">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">11</div>
+        <label class="card-label" for="f-necessidades">Há alguma necessidade prática ou urgente no campo?</label>
+      </div>
+      <div class="card-dica">Materiais, logística, saúde, apoio financeiro específico. Se não há nada urgente, pode escrever isso.</div>
+      <textarea id="f-necessidades" style="min-height:80px;" placeholder="Ex: Precisamos de Bíblias em quantidade — há 15 novos convertidos sem Bíblia. (ou: Sem necessidades urgentes neste momento, obrigado.)"></textarea>
+    </div>
+
+    <!-- 12. FOTOS -->
+    <div class="card" id="card-12">
+      <div class="ok-check">✓</div>
+      <div class="card-titulo">
+        <div class="card-num">12</div>
+        <span class="card-label">Fotos do mês — mínimo 3, máximo 10<span class="obrig">*</span></span>
+      </div>
+      <div class="card-dica">Fotos de cultos, batismos, trabalho com crianças, visitas a comunidades, obras. JPG ou PNG, até 20MB por foto.</div>
+      <div class="upload-area" id="upload-area">
+        <input type="file" id="f-fotos" multiple accept="image/*,video/*" style="display:none;">
+        <span class="upload-icon">📷</span>
+        <div class="upload-title">Clique aqui ou arraste as fotos</div>
+        <div class="upload-hint">JPG, PNG, MP4 — até 20MB por arquivo — máximo 10 arquivos</div>
+      </div>
+      <div id="fotos-count">0/10 fotos</div>
+      <div class="fotos-preview-grid" id="fotos-preview"></div>
+    </div>
+
+    <!-- SUBMIT -->
+    <div class="submit-area">
+      <div id="erro-global" style="margin-bottom:16px;"></div>
+      <button class="btn-enviar" id="btn-enviar">✦ Enviar Relatório do Mês</button>
+      <div class="submit-aviso">Ao enviar, o relatório vai diretamente para a equipe de comunicação da agência.<br>Após enviar, não é possível editar — entre em contato com a secretaria se precisar corrigir.</div>
+    </div>
+  </main>
+</div>
+
+<!-- SUCESSO -->
+<div id="sucesso">
+  <span class="sucesso-icon">🙏</span>
+  <h2>Relatório enviado com sucesso!</h2>
+  <p>Obrigado por compartilhar o que Deus está fazendo no seu campo. A equipe de comunicação vai transformar este relatório em uma bênção para as igrejas parceiras que oram e ofertam por você.</p>
+  <div class="sucesso-verso">"A missão avança quando a igreja entende que Deus usa diferentes funções para cumprir um único propósito." — Informativo Geral NAM 2025</div>
+  <p style="font-size:12px; margin-top:8px;">Enviado em: <strong id="sucesso-data"></strong></p>
+</div>
+
+<footer>Nossa Agência Missionária &nbsp;·&nbsp; Sistema de Relatórios Mensais &nbsp;·&nbsp; Desenvolvido para uso interno</footer>
+
+<script>
+// Progress bar tracking
+function updateProgress() {
+  const fields = [
+    document.getElementById('f-missionario').value !== '',
+    document.getElementById('f-mes').value !== '',
+    (document.getElementById('f-resumo').value.trim().length >= 300),
+    (document.getElementById('f-alcancadas').value !== ''),
+    !!document.querySelector('input[name="decisoes"]:checked'),
+    (document.getElementById('f-discipulado').value.trim().length >= 100),
+    (document.getElementById('f-desafios').value.trim().length >= 80),
+    (document.getElementById('f-frutos').value.trim().length >= 80),
+    (document.getElementById('f-oracao').value.trim().length >= 50),
+    (window._fotosCount >= 3),
+  ];
+  const pct = Math.round((fields.filter(Boolean).length / fields.length) * 100);
+  document.getElementById('prog-bar').style.width = pct + '%';
+  document.getElementById('prog-pct').textContent = pct + '%';
+  document.getElementById('prog-label').textContent = pct === 100 ? 'Pronto para enviar!' : 'Preenchimento em andamento';
+}
+
+// Track foto count for progress
+Object.defineProperty(window, '_fotosCount', {
+  get() { return window.__fotosCount || 0; },
+  set(v) { window.__fotosCount = v; updateProgress(); }
+});
+
+// Patch updateFotoCount to update progress
+const _origUpdate = window.updateFotoCount;
+
+// Update progress on every input
+document.addEventListener('input', updateProgress);
+document.addEventListener('change', updateProgress);
+
+// Sucesso data
+document.getElementById('sucesso-data').textContent = new Date().toLocaleDateString('pt-BR', {
+  weekday:'long', day:'numeric', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit'
+});
+</script>
+</body>
+</html>
