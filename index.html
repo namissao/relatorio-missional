@@ -35,40 +35,106 @@ const db  = getFirestore(app);
 const DRIVE_FOLDER_ID = '15fbCkPufQdDByMPu3becLBwmMopz7wzj';
 // ════════════════════════════════════════════════════
 
-// ── Upload para Google Drive via Apps Script (qualidade original) ──
-// O Apps Script serve como proxy autenticado — fotos ficam no seu Drive
-async function uploadParaDrive(file, nomePasta) {
-  // Lê o arquivo como base64
-  const base64 = await new Promise((resolve, reject) => {
+// ══════════════════════════════════════════════════════════════════
+// Upload para Google Drive — qualidade 100% original, sem compressão
+// Fotos grandes são divididas em pedaços de 3MB (chunks). O Apps
+// Script acumula os pedaços no Drive e monta o arquivo completo.
+// Cada pedaço tem retry automático (até 3 tentativas) em caso de
+// falha de rede ou timeout.
+// ══════════════════════════════════════════════════════════════════
+
+// 3MB por chunk — fica confortavelmente abaixo do timeout do Apps Script
+// mesmo em conexões lentas de área remota (50–100KB/s)
+const CHUNK_SIZE_BYTES = 3 * 1024 * 1024;
+// base64 expande ~33%, então o slice no string base64 equivale a:
+const CHUNK_SIZE_B64 = Math.ceil(CHUNK_SIZE_BYTES * 4 / 3);
+
+async function lerBase64(file) {
+  return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = e => resolve(e.target.result.split(',')[1]);
+    reader.onload  = e => resolve(e.target.result.split(',')[1]);
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
 
-  const payload = {
-    nome: file.name,
-    tipo: file.type,
-    base64,
-    pasta: nomePasta,
-    folderId: DRIVE_FOLDER_ID
-  };
+async function uploadParaDrive(file, nomePasta) {
+  const base64Full = await lerBase64(file);
 
-  const resp = await fetch(APPS_SCRIPT_URL, {
-    method: 'POST',
-    body: JSON.stringify(payload)
+  // ── Arquivo pequeno (≤ 3MB): envia em uma única chamada ──────
+  if (base64Full.length <= CHUNK_SIZE_B64) {
+    const data = await chamarScript({
+      acao:  'upload_completo',
+      nome:  file.name,
+      tipo:  file.type,
+      base64: base64Full,
+      pasta: nomePasta
+    });
+    if (!data.url) throw new Error('Drive não retornou URL');
+    return { nome: file.name, tipo: file.type, url: data.url, fileId: data.fileId };
+  }
+
+  // ── Arquivo grande: divide e monta no Drive ───────────────────
+  const partes = [];
+  for (let i = 0; i < base64Full.length; i += CHUNK_SIZE_B64) {
+    partes.push(base64Full.slice(i, i + CHUNK_SIZE_B64));
+  }
+
+  // Parte 0 — cria o arquivo temporário no Drive
+  const inicio = await chamarScript({
+    acao:         'chunk_inicio',
+    nome:         file.name,
+    tipo:         file.type,
+    pasta:        nomePasta,
+    total_partes: partes.length,
+    parte:        0,
+    base64:       partes[0]
+  });
+  const uploadId = inicio.uploadId;
+
+  // Partes intermediárias
+  for (let i = 1; i < partes.length - 1; i++) {
+    await chamarScript({ acao: 'chunk_meio', uploadId, parte: i, base64: partes[i] });
+  }
+
+  // Última parte — fecha o arquivo e retorna URL
+  const fim = await chamarScript({
+    acao:   'chunk_fim',
+    uploadId,
+    parte:  partes.length - 1,
+    base64: partes[partes.length - 1]
   });
 
-  const data = await resp.json();
-  if (!data.url) throw new Error('Drive não retornou URL');
-  return { nome: file.name, tipo: file.type, url: data.url, fileId: data.fileId };
+  if (!fim.url) throw new Error('Drive não retornou URL na parte final');
+  return { nome: file.name, tipo: file.type, url: fim.url, fileId: fim.fileId };
+}
+
+// Faz a chamada ao Apps Script com retry automático
+async function chamarScript(payload, tentativa = 1) {
+  const MAX = 3;
+  try {
+    const resp = await fetch(APPS_SCRIPT_URL, {
+      method: 'POST',
+      body:   JSON.stringify(payload)
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    if (!data.ok) throw new Error(data.erro || 'Erro no servidor');
+    return data;
+  } catch (err) {
+    if (tentativa < MAX) {
+      await new Promise(r => setTimeout(r, 2000 * tentativa)); // 2s, 4s
+      return chamarScript(payload, tentativa + 1);
+    }
+    throw new Error('Falhou após ' + MAX + ' tentativas: ' + err.message);
+  }
 }
 // ──────────────────────────────────────────────────────────────────
 
 // ════════════════════════════════════════════════════
 // ▶ URL DO GOOGLE APPS SCRIPT (PASSO APPS SCRIPT)
 // ════════════════════════════════════════════════════
-const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby81aplZiBOvUP6RiP9TV10Bt8ODPWFJQM623x_TQrmjQDiAklvBTaecuQFMMZG5dsD7w/exec';
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwswccgbtJOcm_jVyZs1A-aJA_rA1pa6W1M3W-Hv3KfGMrgDvfnqwj6ZjXmmeW2NKou/exec';
 // ════════════════════════════════════════════════════
 
 
@@ -89,6 +155,7 @@ const MISSIONARIOS = [
   { nome: "Sairose e Noemi", campo: "Moçambique" },
   { nome: "Leonardo e lony", campo: "Nordeste — Natal/RN" },
   { nome: "James", campo: "Rio Juruá - AM (Ipixuna)" },
+  { nome: "Alderon e Angela", campo: "Nordeste — Juazeiro do Norte/CE" },
 ];
 // ════════════════════════════════════════════════════
 
@@ -157,7 +224,6 @@ function setupUpload() {
       if (!f.type.startsWith('image/') && !f.type.startsWith('video/')) return;
       if (f.size > 20 * 1024 * 1024) { showGlobalError('Arquivo "' + f.name + '" é maior que 20MB. Compacte antes de enviar.'); return; }
       if (fotosFiles.find(x => x.name === f.name && x.size === f.size)) return;
-      if (fotosFiles.length >= 10) { showGlobalError('Máximo de 10 arquivos por relatório.'); return; }
       fotosFiles.push(f);
 
       const div = document.createElement('div');
@@ -192,8 +258,9 @@ function setupUpload() {
 
   function updateFotoCount() {
     const cnt = document.getElementById('fotos-count');
-    cnt.textContent = fotosFiles.length + '/10 fotos';
-    cnt.style.color = fotosFiles.length >= 3 ? '#01974B' : '#E67E22';
+    const n = fotosFiles.length;
+    cnt.textContent = n + (n === 1 ? ' foto' : ' fotos') + (n < 5 ? ' (mínimo 5)' : ' ✓');
+    cnt.style.color = n >= 5 ? '#01974B' : '#E67E22';
   }
 }
 
@@ -229,7 +296,7 @@ async function submitForm() {
   const oracao = document.getElementById('f-oracao').value.trim();
   if (oracao.length < 50) { erros.push('Compartilhe seus pedidos de oração.'); markRequired('f-oracao'); }
 
-  if (fotosFiles.length < 3) { erros.push('Envie pelo menos 3 fotos do mês.'); document.getElementById('upload-area').classList.add('upload-erro'); }
+  if (fotosFiles.length < 5) { erros.push('Envie pelo menos 5 fotos do mês.'); document.getElementById('upload-area').classList.add('upload-erro'); }
 
   if (erros.length > 0) {
     showGlobalError('⚠️ Corrija os campos abaixo antes de enviar:\n• ' + erros.join('\n• '));
@@ -241,32 +308,58 @@ async function submitForm() {
   const btn = document.getElementById('btn-enviar');
   btn.disabled = true;
 
+  // Mostra overlay — bloqueia a tela para o missionário não fechar
+  abrirOverlay(fotosFiles);
+
   try {
     // Verificar envio duplicado
-    btn.textContent = '⏳ Verificando envio anterior...';
+    atualizarOverlay(-1, fotosFiles.length, 'Verificando envio anterior...');
     const q = query(collection(db, "relatorios"), where("campo", "==", missionario.campo), where("mes_referencia", "==", mesRef));
     const existing = await getDocs(q);
     if (!existing.empty) {
+      fecharOverlay();
       showGlobalError('Você já enviou o relatório de ' + mesRef + ' para este campo. Entre em contato com a secretaria se precisar corrigir algo.');
-      btn.disabled = false; btn.textContent = '✦ Enviar Relatório'; return;
+      btn.disabled = false; btn.textContent = '✦ Enviar Relatório do Mês'; return;
     }
 
-    // Upload fotos para o Google Drive (qualidade original)
+    // Upload fotos para o Google Drive (qualidade original, com retry)
     const nomePasta = `${mesRef.replace(' ','_')}_${missionario.campo.replace(/[^a-zA-Z0-9]/g,'_')}`;
-    const fotosInfo = [];
+    const fotosInfo  = [];
+    const errosUpload = [];
+
     for (let i = 0; i < fotosFiles.length; i++) {
-      btn.textContent = `⏳ Enviando foto ${i+1} de ${fotosFiles.length} para o Drive...`;
+      const f = fotosFiles[i];
+      atualizarOverlay(i, fotosFiles.length, 'Enviando foto ' + (i+1) + ' de ' + fotosFiles.length + '...');
+      marcarFotoOverlay(i, 'ativa');
       try {
-        const info = await uploadParaDrive(fotosFiles[i], nomePasta);
+        const info = await uploadParaDrive(f, nomePasta);
         fotosInfo.push(info);
+        marcarFotoOverlay(i, 'ok');
       } catch(uploadErr) {
-        console.warn('Erro ao enviar foto ' + fotosFiles[i].name, uploadErr);
-        fotosInfo.push({ nome: fotosFiles[i].name, tipo: fotosFiles[i].type, url: null, erro: true });
+        console.warn('Erro ao enviar foto ' + f.name, uploadErr);
+        errosUpload.push(f.name);
+        fotosInfo.push({ nome: f.name, tipo: f.type, url: null, erro: true });
+        marcarFotoOverlay(i, 'erro');
       }
     }
 
+    // Se ficou abaixo do mínimo de 5, cancela
+    const enviadas = fotosInfo.filter(f => f.url).length;
+    if (enviadas < 5) {
+      fecharOverlay();
+      showGlobalError(
+        '⚠️ Apenas ' + enviadas + ' de ' + fotosFiles.length + ' fotos chegaram — precisamos de pelo menos 5.\n\n' +
+        'Fotos com erro:\n• ' + errosUpload.join('\n• ') + '\n\n' +
+        'Verifique sua internet e tente novamente.'
+      );
+      document.getElementById('erro-global').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      btn.disabled = false;
+      btn.textContent = '✦ Enviar Relatório do Mês';
+      return;
+    }
+
     // Salvar Firestore
-    btn.textContent = '⏳ Salvando relatório...';
+    atualizarOverlay(fotosFiles.length, fotosFiles.length, 'Salvando relatório...');
     const [mes, ano] = mesRef.split(' ');
     const mesNum = MESES.indexOf(mes) + 1;
 
@@ -293,16 +386,65 @@ async function submitForm() {
     });
 
     document.getElementById('form-wrap').style.display = 'none';
+    fecharOverlay();
     document.getElementById('sucesso').style.display = 'block';
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
   } catch(e) {
     console.error(e);
+    fecharOverlay();
     showGlobalError('Erro ao enviar: ' + e.message + '\nVerifique sua internet e tente novamente.');
     btn.disabled = false;
-    btn.textContent = '✦ Enviar Relatório';
+    btn.textContent = '✦ Enviar Relatório do Mês';
   }
 }
+
+// ── Controle do overlay de envio ─────────────────────────────────
+function abrirOverlay(arquivos) {
+  const grid = document.getElementById('ov-grid');
+  grid.innerHTML = '';
+  arquivos.forEach((f, i) => {
+    const div = document.createElement('div');
+    div.className = 'ov-foto';
+    div.id = 'ov-foto-' + i;
+    if (f.type.startsWith('image/')) {
+      const img = document.createElement('img');
+      const reader = new FileReader();
+      reader.onload = e => { img.src = e.target.result; };
+      reader.readAsDataURL(f);
+      div.appendChild(img);
+    } else {
+      div.textContent = '🎬';
+    }
+    const status = document.createElement('div');
+    status.className = 'ov-foto-status';
+    status.id = 'ov-status-' + i;
+    status.textContent = '⏳';
+    div.appendChild(status);
+    grid.appendChild(div);
+  });
+  document.getElementById('overlay-envio').classList.add('ativo');
+}
+
+function marcarFotoOverlay(i, estado) {
+  const div    = document.getElementById('ov-foto-' + i);
+  const status = document.getElementById('ov-status-' + i);
+  if (!div || !status) return;
+  div.classList.remove('ok', 'erro', 'ativa');
+  div.classList.add(estado);
+  status.textContent = estado === 'ok' ? '✅' : estado === 'erro' ? '❌' : '📡';
+}
+
+function atualizarOverlay(fotoAtual, total, label) {
+  const pct = fotoAtual < 0 ? 5 : Math.round(((fotoAtual + 1) / (total + 1)) * 100);
+  document.getElementById('ov-barra').style.width = pct + '%';
+  document.getElementById('ov-label').textContent = label;
+}
+
+function fecharOverlay() {
+  document.getElementById('overlay-envio').classList.remove('ativo');
+}
+// ─────────────────────────────────────────────────────────────────
 
 function markRequired(id) {
   const el = document.getElementById(id);
@@ -616,6 +758,104 @@ textarea { min-height: 120px; resize: vertical; line-height: 1.7; }
 #sucesso p { font-size: 14px; color: var(--soft); line-height: 1.7; }
 .sucesso-verso { background: #F0FDF7; border-left: 4px solid var(--green); border-radius: 0 10px 10px 0; padding: 14px 16px; margin: 24px 0; text-align: left; font-style: italic; font-size: 13px; color: var(--green-dark); }
 
+/* OVERLAY DE ENVIO — cobre a tela toda para ninguém fechar por acidente */
+#overlay-envio {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 24, 47, 0.92);
+  z-index: 9999;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  text-align: center;
+}
+#overlay-envio.ativo { display: flex; }
+.ov-icone { font-size: 52px; margin-bottom: 16px; animation: pulsar 1.4s ease-in-out infinite; }
+@keyframes pulsar { 0%,100%{transform:scale(1);opacity:1} 50%{transform:scale(1.12);opacity:0.8} }
+.ov-titulo {
+  font-size: 20px;
+  font-weight: 800;
+  color: white;
+  margin-bottom: 6px;
+  font-family: 'Montserrat', sans-serif;
+}
+.ov-subtitulo {
+  font-size: 13px;
+  color: #7EB8FF;
+  margin-bottom: 28px;
+  line-height: 1.6;
+  max-width: 320px;
+}
+.ov-aviso {
+  font-size: 12px;
+  color: #E67E22;
+  font-weight: 700;
+  background: rgba(230,126,34,0.15);
+  border: 1px solid rgba(230,126,34,0.4);
+  border-radius: 8px;
+  padding: 10px 16px;
+  margin-bottom: 28px;
+  max-width: 320px;
+}
+/* Barra de progresso do overlay */
+.ov-barra-fundo {
+  width: 100%;
+  max-width: 340px;
+  height: 10px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 99px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+.ov-barra {
+  height: 100%;
+  background: linear-gradient(90deg, #0044B3, #01974B);
+  border-radius: 99px;
+  transition: width 0.5s ease;
+  width: 0%;
+}
+.ov-label-fotos {
+  font-size: 12px;
+  color: #7EB8FF;
+  font-weight: 600;
+  margin-bottom: 24px;
+}
+/* Miniaturas das fotos com status de envio */
+.ov-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  max-width: 360px;
+  margin-bottom: 20px;
+}
+.ov-foto {
+  width: 58px; height: 58px;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+  border: 2px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.08);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px;
+}
+.ov-foto img { width:100%; height:100%; object-fit:cover; }
+.ov-foto-status {
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px;
+  background: rgba(0,0,0,0.45);
+  border-radius: 6px;
+}
+.ov-foto.ok    { border-color: #01974B; }
+.ov-foto.ok    .ov-foto-status { background: rgba(1,151,75,0.55); }
+.ov-foto.erro  { border-color: #C0392B; }
+.ov-foto.ativa { border-color: #7EB8FF; animation: piscar 0.8s ease infinite; }
+@keyframes piscar { 0%,100%{border-color:#7EB8FF} 50%{border-color:rgba(126,184,255,0.3)} }
+
 /* RODAPÉ */
 footer { background: var(--blue-dark); color: #7EB8FF; text-align: center; padding: 18px; font-size: 12px; margin-top: 40px; }
 </style>
@@ -802,14 +1042,14 @@ footer { background: var(--blue-dark); color: #7EB8FF; text-align: center; paddi
       <div class="ok-check">✓</div>
       <div class="card-titulo">
         <div class="card-num">12</div>
-        <span class="card-label">Fotos do mês — mínimo 3, máximo 10<span class="obrig">*</span></span>
+        <span class="card-label">Fotos do mês — mínimo 5, sem limite máximo<span class="obrig">*</span></span>
       </div>
-      <div class="card-dica">Fotos de cultos, batismos, trabalho com crianças, visitas a comunidades, obras. JPG ou PNG, até 20MB por foto.</div>
+      <div class="card-dica">Fotos de cultos, batismos, trabalho com crianças, visitas a comunidades, obras. JPG ou PNG, até 20MB por foto. Envie quantas quiser!</div>
       <div class="upload-area" id="upload-area">
         <input type="file" id="f-fotos" multiple accept="image/*,video/*" style="display:none;">
         <span class="upload-icon">📷</span>
         <div class="upload-title">Clique aqui ou arraste as fotos</div>
-        <div class="upload-hint">JPG, PNG, MP4 — até 20MB por arquivo — máximo 10 arquivos</div>
+        <div class="upload-hint">JPG, PNG, MP4 — até 20MB por arquivo — mínimo 5 fotos, sem limite máximo</div>
       </div>
       <div id="fotos-count">0/10 fotos</div>
       <div class="fotos-preview-grid" id="fotos-preview"></div>
@@ -833,6 +1073,17 @@ footer { background: var(--blue-dark); color: #7EB8FF; text-align: center; paddi
   <p style="font-size:12px; margin-top:8px;">Enviado em: <strong id="sucesso-data"></strong></p>
 </div>
 
+<!-- OVERLAY DE ENVIO — aparece durante todo o processo de upload -->
+<div id="overlay-envio">
+  <div class="ov-icone">📡</div>
+  <div class="ov-titulo">Enviando relatório...</div>
+  <div class="ov-subtitulo">Suas fotos estão chegando até nós com qualidade 100% original. Aguarde com a tela aberta.</div>
+  <div class="ov-aviso">⚠️ Não feche nem recarregue esta página</div>
+  <div class="ov-barra-fundo"><div class="ov-barra" id="ov-barra"></div></div>
+  <div class="ov-label-fotos" id="ov-label">Preparando...</div>
+  <div class="ov-grid" id="ov-grid"></div>
+</div>
+
 <footer>Nossa Agência Missionária &nbsp;·&nbsp; Sistema de Relatórios Mensais &nbsp;·&nbsp; Desenvolvido para uso interno</footer>
 
 <script>
@@ -848,7 +1099,7 @@ function updateProgress() {
     (document.getElementById('f-desafios').value.trim().length >= 80),
     (document.getElementById('f-frutos').value.trim().length >= 80),
     (document.getElementById('f-oracao').value.trim().length >= 50),
-    (window._fotosCount >= 3),
+    (window._fotosCount >= 5),
   ];
   const pct = Math.round((fields.filter(Boolean).length / fields.length) * 100);
   document.getElementById('prog-bar').style.width = pct + '%';
