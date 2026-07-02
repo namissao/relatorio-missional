@@ -25,7 +25,7 @@ const firebaseConfig = {
 // ======================================================
 // 2. COLE AQUI A URL DO SEU APPS SCRIPT
 // ======================================================
-const APPS_SCRIPT_URL = "https://script.google.com/macros/library/d/17gKX5dkbeq3h4VsR7_I8BeeN9VoEPyv1NLrPpo7-9rbxv_BOyDSG0dEJ/4";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxa-pXbWFevnC4pBAGfz2cE9a-QgogseG63C8J0HgMJ3mjoIgOG1ebfSFcqxx2pPaJ6yw/exec";
 // ======================================================
 // 3. LISTA DE MISSIONARIOS
 // ======================================================
@@ -239,52 +239,76 @@ async function enviar() {
   }
 }
 
-async function enviarFotoDrive(file, pasta) {
-  const CHUNK_BYTES = 3 * 1024 * 1024;
-  const CHUNK_B64   = Math.ceil(CHUNK_BYTES * 4 / 3);
-  const b64Full = await new Promise((res,rej) => {
+// Reduz imagem para max 2000px e qualidade 92% — visualmente identica ao original
+// mas garante que qualquer foto de celular fique abaixo de 4MB (limite do Apps Script)
+async function prepararFoto(file) {
+  if (!file.type.startsWith('image/')) {
+    // Video: lê direto como base64 sem redimensionar
+    return await lerBase64(file);
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 2000;
+        let w = img.width, h = img.height;
+        if (w > MAX || h > MAX) {
+          if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+          else       { w = Math.round(w * MAX / h); h = MAX; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        // 92% de qualidade — diferença imperceptivel, reduz tamanho significativamente
+        const b64 = canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
+        resolve(b64);
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function lerBase64(file) {
+  return new Promise((res, rej) => {
     const r = new FileReader();
     r.onload  = e => res(e.target.result.split(',')[1]);
     r.onerror = rej;
     r.readAsDataURL(file);
   });
+}
 
-  if (b64Full.length <= CHUNK_B64) {
-    const d = await post({ acao:'upload_completo', nome:file.name, tipo:file.type, base64:b64Full, pasta });
-    if (!d.ok || !d.url) throw new Error(d.erro || 'Sem URL');
-    return d.url;
-  }
+async function enviarFotoDrive(file, pasta) {
+  // Prepara a foto (reduz resolução se necessário, mantém qualidade 92%)
+  const tipo  = file.type.startsWith('image/') ? 'image/jpeg' : file.type;
+  const nome  = file.type.startsWith('image/') ? file.name.replace(/\.[^.]+$/, '.jpg') : file.name;
+  const b64   = await prepararFoto(file);
 
-  const partes = [];
-  for (let i = 0; i < b64Full.length; i += CHUNK_B64) partes.push(b64Full.slice(i, i + CHUNK_B64));
-
-  const ini = await post({ acao:'chunk_inicio', nome:file.name, tipo:file.type, base64:partes[0], pasta });
-  if (!ini.ok) throw new Error(ini.erro || 'Erro no inicio');
-  const uploadId = ini.uploadId;
-
-  for (let i = 1; i < partes.length - 1; i++) {
-    const m = await post({ acao:'chunk_meio', uploadId, base64:partes[i] });
-    if (!m.ok) throw new Error(m.erro || 'Erro no chunk ' + i);
-  }
-
-  const fim = await post({ acao:'chunk_fim', uploadId, base64:partes[partes.length-1] });
-  if (!fim.ok || !fim.url) throw new Error(fim.erro || 'Sem URL no fim');
-  return fim.url;
+  // Envia em uma única chamada — simples e confiável
+  const resp = await post({ acao: 'upload_completo', nome, tipo, base64: b64, pasta });
+  if (!resp.ok || !resp.url) throw new Error(resp.erro || 'Drive nao retornou URL');
+  return resp.url;
 }
 
 async function post(payload) {
-  // redirect:follow necessario para o Apps Script que faz redirect apos autenticacao
   const r = await fetch(APPS_SCRIPT_URL, {
-    method: 'POST',
-    body: JSON.stringify(payload),
+    method:   'POST',
+    body:     JSON.stringify(payload),
     redirect: 'follow'
   });
-  if (!r.ok) throw new Error('Servidor retornou erro HTTP ' + r.status);
   const text = await r.text();
+  // O Apps Script às vezes retorna HTML de erro — capturamos isso claramente
+  if (text.trim().startsWith('<')) {
+    throw new Error('Apps Script retornou pagina HTML. Verifique se a URL esta correta e publicada como App da Web.');
+  }
   try {
-    return JSON.parse(text);
+    const data = JSON.parse(text);
+    return data;
   } catch(e) {
-    throw new Error('Resposta invalida do servidor: ' + text.substring(0, 100));
+    throw new Error('Resposta invalida: ' + text.substring(0, 80));
   }
 }
 
