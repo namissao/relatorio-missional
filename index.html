@@ -33,18 +33,18 @@ const MISSIONARIOS = [
   { nome: "Davi e Mileide",       campo: "Rio Jura - AM (Envira)" },
   { nome: "Micael e Gislaine",    campo: "Rio Purus - AM (Lago Mamoria)" },
   { nome: "Mateus e Emely",       campo: "Rio Purus - AM (Maraa)" },
-  { nome: "Charles e Rainas",     campo: "Rio Purus - AM (Comunidades)" },
+  { nome: "Charles e Rainas",     campo: "Rio Purus - AM (Comunidades 1)" },
   { nome: "Francisco e equipe",   campo: "Rio Negro / Rio Unini - AM" },
-  { nome: "Josepe e Angelica",    campo: "Rio Purus - Comunidades" },
+  { nome: "Josepe e Angelica",    campo: "Rio Purus - AM (Comunidades 2)" },
   { nome: "Thiago e Kezia",       campo: "Costa Rica" },
-  { nome: "Josue e Gloria",       campo: "Rio Purus - Comunidades" },
+  { nome: "Josue e Gloria",       campo: "Rio Purus - AM (Comunidades 3)" },
   { nome: "Sairose e Noemi",      campo: "Mocambique" },
   { nome: "Leonardo e Lony",      campo: "Nordeste - Natal/RN" },
   { nome: "James",                campo: "Rio Jura - AM (Ipixuna)" },
   { nome: "Alderon e Angela",     campo: "Nordeste - Juazeiro do Norte/CE" },
   { nome: "Mileide Helena",       campo: "Camp Brasil - Regiao Envira" },
-  { nome: "Cleani Paumari",       campo: "Camp Brasil - Regiao Purus" },
-  { nome: "Geovan Lucio",         campo: "Camp Brasil - Regiao Purus" },
+  { nome: "Cleani Paumari",       campo: "Camp Brasil - Regiao Purus 1" },
+  { nome: "Geovan Lucio",         campo: "Camp Brasil - Regiao Purus 2" },
   { nome: "Francia Velasquez",    campo: "Santa Catarina - Araquari" },
   { nome: "Walisson e Ana Julia", campo: "Teresina de Goias - Comunidades Quilombolas" },
   { nome: "Hugo e Monalisa",      campo: "Para - Igarape Mirim" },
@@ -172,8 +172,15 @@ async function enviar() {
   try {
     // 1. Verificar duplicata
     overlayTexto('Verificando envio anterior...');
-    const q = query(collection(db,'relatorios'), where('campo','==',missionario.campo), where('mes_referencia','==',mesRef));
-    if (!(await getDocs(q)).empty) {
+    const q = query(
+      collection(db,'relatorios'),
+      where('campo','==',missionario.campo),
+      where('mes_referencia','==',mesRef)
+    );
+    const docs = await getDocs(q);
+    // Verifica se existe relatorio completo (com resumo_geral preenchido)
+    const temCompleto = !docs.empty && docs.docs.some(d => d.data().resumo_geral && d.data().resumo_geral.length > 0);
+    if (temCompleto) {
       fecharOverlay();
       mostrarErro('Voce ja enviou o relatorio de ' + mesRef + '. Fale com a secretaria para corrigir.');
       btn.disabled = false; return;
@@ -186,9 +193,14 @@ async function enviar() {
     for (let i = 0; i < fotosFiles.length; i++) {
       const f = fotosFiles[i];
       overlayFoto(i, fotosFiles.length, f.name);
-      let url = null, ultimoErro = '';
-      try { url = await enviarFotoDrive(f, nomePasta); }
-      catch(e) { ultimoErro = e.message; }
+      let url = null, ultimoErro = 'Erro desconhecido';
+      try {
+        url = await enviarFotoDrive(f, nomePasta);
+        if (!url) ultimoErro = 'Drive nao retornou URL';
+      } catch(e) {
+        ultimoErro = e.message || 'Erro sem mensagem';
+        console.error('Erro foto ' + f.name + ':', e);
+      }
       if (!url) {
         fecharOverlay();
         mostrarErro('A foto "' + f.name + '" nao chegou.\n\nMotivo: ' + ultimoErro + '\n\nVerifique sua conexao e tente novamente. Se continuar, fale com a secretaria.');
@@ -294,34 +306,17 @@ async function enviarFotoDrive(file, pasta) {
 }
 
 async function post(payload) {
-  // Usa no-cors porque o Apps Script não retorna headers CORS corretos
-  // A foto chega no Drive mesmo assim — verificamos pelo fileId depois
-  try {
-    const r = await fetch(APPS_SCRIPT_URL, {
-      method: 'POST',
-      body:   JSON.stringify(payload)
-    });
-    const text = await r.text();
-    if (text.trim().startsWith('<')) {
-      throw new Error('URL do Apps Script incorreta ou sem permissao de acesso.');
-    }
-    return JSON.parse(text);
-  } catch(e) {
-    // Se o erro for de CORS/network mas a foto chegou, tenta com no-cors
-    if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError') || e.message.includes('CORS')) {
-      // Envia sem esperar resposta (foto chega no Drive mesmo sem resposta CORS)
-      fetch(APPS_SCRIPT_URL, {
-        method: 'POST',
-        body:   JSON.stringify(payload),
-        mode:   'no-cors'
-      }).catch(() => {});
-      // Aguarda 3 segundos para o Drive processar
-      await new Promise(r => setTimeout(r, 3000));
-      // Retorna sucesso otimista — a foto chegou no Drive
-      return { ok: true, url: 'enviado', fileId: 'no-cors' };
-    }
-    throw e;
-  }
+  const r = await fetch(APPS_SCRIPT_URL, {
+    method:  'POST',
+    body:    JSON.stringify(payload),
+    redirect: 'follow'
+  });
+  const text = await r.text();
+  if (!text || text.trim() === '') throw new Error('Resposta vazia do servidor');
+  if (text.trim().startsWith('<')) throw new Error('Apps Script retornou pagina de login. Republique como Qualquer pessoa.');
+  const data = JSON.parse(text);
+  if (!data.ok) throw new Error(data.erro || 'Servidor retornou erro');
+  return data;
 }
 
 function esperar(ms) { return new Promise(r => setTimeout(r, ms)); }
